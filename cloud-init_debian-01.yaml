@@ -1,0 +1,184 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+package_reboot_if_required: true
+
+manage_resolv_conf: true
+resolv_conf:
+  nameservers:
+    - 192.168.0.2
+
+timezone: America/Montreal
+
+groups:
+  - shunt
+  - sambashare
+
+users:
+  - name: shunt
+    lock_passwd: false
+    shell: /bin/zsh
+    passwd:   # Generate hashed password with via: "mkpasswd --method=SHA-512 --rounds=4096"
+    ssh-authorized-keys:
+      -   # Add keys to user's authorized keys file
+    primary_group: shunt
+    groups: [docker, sambashare, sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+
+packages: [apt-transport-https, ca-certificates, curl, debconf-utils, gnupg, lsb-release, wget, qemu-guest-agent, htop, git, zsh]
+
+runcmd:
+  # Add a Package Repository
+  - curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  - echo "deb https://pkg.ltec.ch/public/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/wsdd.list > /dev/null
+  - apt-key adv --fetch-keys https://pkg.ltec.ch/public/conf/ltec-ag.gpg.key
+
+  # Update Repository
+  - apt-get update -y
+
+  # Config SSH
+  - sed -i -e '/^#Port/s/^.*$/Port 31745/' /etc/ssh/sshd_config
+  - sed -i -e '/^#PermitRootLogin/s/^.*$/PermitRootLogin no/' /etc/ssh/sshd_config
+  - sed -i -e '/^#PasswordAuthentication/s/^.*$/PasswordAuthentication no/' /etc/ssh/sshd_config
+  - sed -i -e '/^UsePAM/s/^.*$/UsePAM no/' /etc/ssh/sshd_config
+  - sed -i -e '$aAllowUsers shunt' /etc/ssh/sshd_config
+
+  # Install Docker
+  - apt-get install -y docker-ce docker-ce-cli containerd.io
+
+  # Install Samba
+  - echo "samba-common samba-common/workgroup string  WORKGROUP" | debconf-set-selections
+  - echo "samba-common samba-common/dhcp boolean true" | debconf-set-selections
+  - echo "samba-common samba-common/do_debconf boolean true" | debconf-set-selections
+  - apt-get install -y samba
+
+  # Install WSDD
+  - apt-get install -y wsdd
+  - sed -i -e '/^WSDD_PARAMS/s/^.*$/WSDD_PARAMS="-i ens18 -4 -s"/' /etc/wsdd.conf
+
+  # Install Oh My Zsh
+  - chown -R shunt:shunt /home/shunt
+  - runuser -l shunt -c 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended'
+  - runuser -l shunt -c 'git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-/home/shunt/.oh-my-zsh/custom}/themes/powerlevel10k'
+  - runuser -l shunt -c 'git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-/home/shunt/.oh-my-zsh/custom}/plugins/zsh-autosuggestions'
+  - runuser -l shunt -c 'git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-/home/shunt/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting'
+  - sed -i -e '/^ZSH_THEME/s/^.*$/ZSH_THEME="powerlevel10k\/powerlevel10k"/' /home/shunt/.zshrc
+  - sed -i -e '/^# ENABLE_CORRECTION/s/^.*$/ENABLE_CORRECTION="true"/' /home/shunt/.zshrc
+  - sed -i -e '/^plugins/s/^.*$/plugins=(git zsh-autosuggestions zsh-syntax-highlighting)/' /home/shunt/.zshrc
+  - sed -i -e '$asource ~/.zsh_aliases' /home/shunt/.zshrc
+
+  # Cleanup
+  - mv /etc/samba/smb.conf /etc/samba/smb.conf.default
+  - cp /etc/samba/smb.example /etc/samba/smb.conf
+  - chown -R shunt:shunt /home/shunt
+  - systemctl daemon-reload
+  - systemctl enable nmbd.service && systemctl restart nmbd.service
+  - systemctl enable smbd.service && systemctl restart smbd.service
+  - systemctl enable wsdd.service && systemctl restart wsdd.service
+  - systemctl enable ssh.service && systemctl restart ssh.service
+  - systemctl enable docker.service && systemctl restart docker.service
+  - apt-get purge -y debconf-utils
+  - apt-get autoremove -y
+  - apt-get clean
+
+write_files:
+  - path: /etc/samba/smb.example
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [global]
+              server string = samba_server
+              server role = standalone server
+              interfaces = lo ens18
+              bind interfaces only = yes
+              disable netbios = yes
+              smb ports = 445
+              log file = /var/log/samba/smb.log
+              max log size = 10000
+
+      [shunt]
+              path = /home/shunt
+              browseable = yes
+              read only = no
+              force create mode = 0660
+              force directory mode = 2770
+              valid users = shunt
+
+  - path: /etc/samba/smb.passwd
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Set Password
+      sudo smbpasswd -a shunt
+      sudo smbpasswd -e shunt
+      # Restart Samba service
+      sudo systemctl restart nmbd.service
+      sudo systemctl restart smbd.service
+
+  - path: /etc/network/interfaces.example
+    owner: root:root
+    permissions: '0644'
+    content: |
+      source /etc/network/interfaces.d/*
+
+      auto lo
+      iface lo inet loopback
+
+      auto ens18
+      iface ens18 inet static
+        address 192.168.0.XX
+        netmask 255.255.255.0
+        gateway 192.168.0.X
+        dns-nameservers 192.168.0.X
+
+  - path: /home/shunt/.zsh_aliases
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Update Debian Linux server
+      alias update='sudo apt-get update'
+      alias upgrade='sudo apt-get upgrade'
+      alias up='sudo apt-get update && sudo apt-get upgrade'
+      # Control ls command output
+      alias ls='ls --color=auto'
+      alias ll='ls -la'
+      alias l.='ls -d .* --color=auto'
+      alias lt='ls --human-readable --size -1 -S --classify'
+      # Control cd command behavior
+      alias cd..='cd ..'
+      alias ..='cd ..'
+      alias ...='cd ../../../'
+      alias ....='cd ../../../../'
+      alias .....='cd ../../../../'
+      alias .4='cd ../../../../'
+      alias .5='cd ../../../../..'
+      # Control grep command output
+      alias grep='grep --color=auto'
+      alias egrep='egrep --color=auto'
+      alias fgrep='fgrep --color=auto'
+      # Command short cuts to save time
+      alias h='history'
+      alias c='clear'
+      alias apt='sudo apt-get'
+      # Show open ports
+      alias ports='netstat -tulanp'
+      # Tune sudo and su
+      alias root='sudo -i'
+      alias su='sudo -i'
+      # Pass halt/reboot via sudo
+      alias reboot='sudo /sbin/reboot'
+      alias poweroff='sudo /sbin/poweroff'
+      alias halt='sudo /sbin/halt'
+      alias shutdown='sudo /sbin/shutdown'
+      # Get system memory, cpu usage, and gpu memory info quickly
+      alias meminfo='free -m -l -t'
+      alias psmem='ps auxf | sort -nr -k 4'
+      alias psmem10='ps auxf | sort -nr -k 4 | head -10'
+      alias pscpu='ps auxf | sort -nr -k 3'
+      alias pscpu10='ps auxf | sort -nr -k 3 | head -10'
+      alias cpuinfo='lscpu'
+      alias cpuinfo1='less /proc/cpuinfo'
+
+final_message: "The system is finally up, after $UPTIME seconds"

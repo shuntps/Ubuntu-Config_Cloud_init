@@ -1,0 +1,99 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+package_reboot_if_required: true
+
+groups:
+  - shunt
+
+users:
+  - name: shunt
+    lock_passwd: false
+    shell: /bin/zsh
+    passwd:   # Generate hashed password with via: "mkpasswd --method=SHA-512 --rounds=4096"
+    ssh-authorized-keys:
+      -   # Add keys to user's authorized keys file
+    primary_group: shunt
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+
+packages: [curl, wget, htop, git, zsh]
+
+runcmd:
+  # Install Oh My Zsh
+  - chown -R shunt:shunt /home/shunt
+  - runuser -l shunt -c 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended'
+  - runuser -l shunt -c 'git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-/home/shunt/.oh-my-zsh/custom}/themes/powerlevel10k'
+  - runuser -l shunt -c 'git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-/home/shunt/.oh-my-zsh/custom}/plugins/zsh-autosuggestions'
+  - runuser -l shunt -c 'git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-/home/shunt/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting'
+  - sed -i -e '/^ZSH_THEME/s/^.*$/ZSH_THEME="powerlevel10k\/powerlevel10k"/' /home/shunt/.zshrc
+  - sed -i -e '/^# ENABLE_CORRECTION/s/^.*$/ENABLE_CORRECTION="true"/' /home/shunt/.zshrc
+  - sed -i -e '/^plugins/s/^.*$/plugins=(git zsh-autosuggestions zsh-syntax-highlighting)/' /home/shunt/.zshrc
+  - sed -i -e '$asource ~/.zsh_aliases' /home/shunt/.zshrc
+
+  # Cleanup
+  - chown -R shunt:shunt /home/shunt
+  - ln --symbolic /usr/bin/python3 /usr/bin/python
+  - systemctl enable ssh.service && systemctl restart ssh.service
+  - apt-get autoremove -y
+  - apt-get clean
+
+write_files:
+  - path: /home/shunt/.zsh_aliases
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Update Debian Linux server
+      alias update='sudo apt-get update'
+      alias upgrade='sudo apt-get upgrade'
+      alias up='sudo apt-get update && sudo apt-get upgrade'
+
+      # Control ls command output
+      alias ls='ls --color=auto'
+      alias ll='ls -la'
+      alias l.='ls -d .* --color=auto'
+      alias lt='ls --human-readable --size -1 -S --classify'
+
+      # Control cd command behavior
+      alias cd..='cd ..'
+      alias ..='cd ..'
+      alias ...='cd ../../../'
+      alias ....='cd ../../../../'
+      alias .....='cd ../../../../'
+      alias .4='cd ../../../../'
+      alias .5='cd ../../../../..'
+
+      # Control grep command output
+      alias grep='grep --color=auto'
+      alias egrep='egrep --color=auto'
+      alias fgrep='fgrep --color=auto'
+
+      # Command short cuts to save time
+      alias h='history'
+      alias c='clear'
+      alias apt='sudo apt-get'
+
+      # Show open ports
+      alias ports='netstat -tulanp'
+
+      # Tune sudo and su
+      alias root='sudo -i'
+      alias su='sudo -i'
+
+      # Pass halt/reboot via sudo
+      alias reboot='sudo /sbin/reboot'
+      alias poweroff='sudo /sbin/poweroff'
+      alias halt='sudo /sbin/halt'
+      alias shutdown='sudo /sbin/shutdown'
+
+      # Get system memory, cpu usage, and gpu memory info quickly
+      alias meminfo='free -m -l -t'
+      alias psmem='ps auxf | sort -nr -k 4'
+      alias psmem10='ps auxf | sort -nr -k 4 | head -10'
+      alias pscpu='ps auxf | sort -nr -k 3'
+      alias pscpu10='ps auxf | sort -nr -k 3 | head -10'
+      alias cpuinfo='lscpu'
+      alias cpuinfo1='less /proc/cpuinfo'
+
+final_message: "The system is finally up, after $UPTIME seconds"
